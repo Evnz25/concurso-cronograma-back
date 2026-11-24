@@ -40,7 +40,7 @@ async function inserirCronograma(usuarioId, id, p) {
   if (ativo === undefined) throw new Rejeicao('ativo precisa ser 0 ou 1.');
 
   await salvar(new Cronograma({
-    _id: id, usuarioId, trilhaId: p.trilha_id, dataInicio, ativo, atualizadoEm: momento,
+    _id: id, usuarioId, trilhaId: p.trilha_id, dataInicio, ativo, atualizadoEm: momento, distribuicaoDiaria: false,
   }));
 }
 

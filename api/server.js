@@ -23,6 +23,7 @@ app.get('/saude', (req, res) => {
 app.use('/catalogo', require('./routes/catalogo'));
 app.use('/auth', require('./routes/auth'));
 app.use('/sync', require('./routes/sync'));
+app.use('/estudo', require('./routes/estudo'));
 app.use('/conta', require('./routes/conta'));
 
 // Nenhuma rota anterior respondeu

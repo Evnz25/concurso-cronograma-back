@@ -61,6 +61,8 @@ const CronogramaSchema = new Schema(
     trilhaId: { type: String, required: true },
     dataInicio: { type: Date, required: true },
     ativo: { type: Boolean, default: true },
+    distribuicaoDiaria: Boolean,
+    versaoPlanejamento: Number,
     atualizadoEm: Date,
     pesos: {
       type: [PesoSchema],
@@ -91,12 +93,13 @@ CronogramaSchema.pre('validate', async function () {
     this.isModified('etapas');
   if (!mudou) return;
 
-  if (this.usuarioId && !(await Usuario.exists({ _id: this.usuarioId }))) {
+  const session = this.$session();
+  if (this.usuarioId && !(await Usuario.exists({ _id: this.usuarioId }).session(session))) {
     this.invalidate('usuarioId', `O usuário "${this.usuarioId}" não existe.`);
   }
 
   if (!this.trilhaId) return;
-  const trilha = await Trilha.findById(this.trilhaId);
+  const trilha = await Trilha.findById(this.trilhaId).session(session);
   if (!trilha) {
     this.invalidate('trilhaId', `A trilha "${this.trilhaId}" não existe.`);
     return;
