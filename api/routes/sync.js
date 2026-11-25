@@ -70,7 +70,13 @@ async function processar(usuarioId, item) {
     if (!tratador) throw new Rejeicao('Operação não permitida para esta entidade.');
 
     const retorno = await tratador(usuarioId, entidadeId, payload);
-    if (entidade === 'tentativa_exercicio') return { id, status: 'ok', tentativa: linhaTentativa(retorno) };
+    if (entidade === 'tentativa_exercicio') {
+      const resultado = { id, status: 'ok', tentativa: linhaTentativa(retorno.tentativa) };
+      if (payload.incluir_cronograma === true) {
+        resultado.plano = retorno.plano ? { cronograma: linhaCronograma(retorno.plano.ciclo), resumo: retorno.plano.resumo } : null;
+      }
+      return resultado;
+    }
     // "ignorada": havia uma alteração mais recente no servidor. Para o app é o mesmo que ok.
     return retorno?.ignorada ? { id, status: 'ok', ignorada: true } : { id, status: 'ok' };
   } catch (erro) {

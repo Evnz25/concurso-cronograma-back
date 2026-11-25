@@ -13,6 +13,7 @@ const linhaCronograma = (c) => ({
     cronograma_id: c._id,
     materia_id: p.materiaId,
     peso: p.peso,
+    peso_inicial: p.pesoInicial ?? p.peso,
     atualizado_em: iso(p.atualizadoEm ?? c.updatedAt),
   })),
   etapas: (c.etapas ?? []).map((e) => ({

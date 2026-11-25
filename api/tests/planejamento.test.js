@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { diaLocal, calcularRevisao, gerarEtapas, redistribuirCicloAnterior, pesosDaSemana } = require('../lib/planejamento');
+const { diaLocal, calcularRevisao, gerarEtapas, redistribuirCicloAnterior, replanejarSemana, pesosDaSemana } = require('../lib/planejamento');
 const { randomUUID } = require('node:crypto');
 
 test('SM-2 usa dias civis e o histórico, inclusive na virada do ano', () => {
@@ -48,6 +48,36 @@ function verificarSemana(etapas, inicio, umaMateria = false) {
   }
   return totais;
 }
+
+test('no último dia prioriza as matérias sem estudo e desconta só o trabalho realizado', () => {
+  const dataInicio = new Date('2026-12-15');
+  const pesos = ['a', 'b', 'c', 'd'].map((materiaId, i) => ({ materiaId, peso: i === 0 ? 1000 : 1 }));
+  const etapas = gerarEtapas(pesos, [], dataInicio);
+  const hoje = etapas[24].data;
+  for (const e of etapas) e.concluida = e.data < hoje && e.materiaId === 'a';
+  const novas = replanejarSemana({ dataInicio, etapas }, pesos, hoje);
+  assert.deepEqual(novas.slice(0, 24), etapas.slice(0, 24));
+  const ultimoDia = novas.slice(24).map(e => e.materiaId);
+  for (const id of ['b', 'c', 'd']) assert.ok(ultimoDia.includes(id));
+  assert.ok(ultimoDia.filter(id => id === 'a').length <= 1);
+  verificarSemana(novas, dataInicio);
+  etapas[24].concluida = true;
+  assert.deepEqual(replanejarSemana({ dataInicio, etapas }, pesos, hoje), etapas);
+});
+
+test('protege os blocos fixos futuros e reserva cobertura semanal quando os pesos são muito diferentes', () => {
+  const dataInicio = new Date('2026-12-15');
+  const pesos = Array.from({ length: 10 }, (_, i) => ({ materiaId: String(i), peso: i < 2 ? 1000 : 0.01 }));
+  const etapas = gerarEtapas(pesos, [], dataInicio);
+  assert.equal(new Set(etapas.map(e => e.materiaId)).size, 10);
+  etapas[9].concluida = true;
+  etapas[15].atualizadoEm = dataInicio;
+  const novas = replanejarSemana({ dataInicio, etapas }, pesos, dataInicio);
+  assert.deepEqual(novas[9], etapas[9]);
+  assert.deepEqual(novas[15], etapas[15]);
+  assert.equal(new Set(novas.map(e => e.materiaId)).size, 10);
+  verificarSemana(novas, dataInicio);
+});
 
 test('três matérias iguais alternam o bloco adicional no decorrer dos ciclos', () => {
   const pesos = ['a', 'b', 'c'].map(materiaId => ({ materiaId, peso: 1 }));

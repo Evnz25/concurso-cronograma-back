@@ -19,6 +19,7 @@ test('API de estudo persiste, recupera e isola cronogramas e revisões', { skip:
   app.use('/auth', require('../routes/auth'));
   app.use('/sync', require('../routes/sync'));
   app.use('/estudo', require('../routes/estudo'));
+  app.use('/catalogo', require('../routes/catalogo'));
   const server = app.listen(0, '127.0.0.1');
   t.after(async () => {
     await new Promise(resolve => server.close(resolve));
@@ -48,6 +49,58 @@ test('API de estudo persiste, recupera e isola cronogramas e revisões', { skip:
   ] });
   await Trilha.create({ _id: 'vazia', nome: 'Sem matérias' });
   const cadastro = { email: 'nova@example.org', nome: 'Nova', senha: 'senha-de-teste' };
+  await t.test('conta nova em Governança inicia e retoma um simulado de todas as matérias', async () => {
+    const { completarGovernanca } = require('../scripts/completar-governanca');
+    await Trilha.create({ _id: 'trilha-gov', nome: 'Governança', materias: [
+      { _id: 'mat-ageis', nome: 'Metodologias Ágeis', temas: [{ _id: 'tema-scrum', nome: 'Scrum' }] },
+    ] });
+    await Questao.create({ _id: 'scrum-existente', materiaId: 'mat-ageis', temaId: 'tema-scrum',
+      enunciado: 'Questão existente?', alternativas: ['A', 'B'], gabarito: 'A', banca: 'Teste', ano: 2025 });
+    assert.equal(await completarGovernanca(), 10);
+    assert.equal(await completarGovernanca(), 0);
+    const { usuario } = await api('/auth/cadastro', { ...cadastro, email: 'gov@example.org', trilha_id: 'trilha-gov' }, 'u1', 201);
+    const [ciclo] = (await api('/sync', undefined, usuario.id)).cronogramas;
+    const iniciar = () => api('/estudo/simulados', { cronograma_id: ciclo.id }, usuario.id);
+    const simulado = await iniciar();
+    const catalogo = await api('/catalogo/questoes?trilhaId=trilha-gov');
+    assert.equal(new Set(catalogo.questoes.map(q => q.materiaId)).size, 5);
+    assert.equal(simulado.total, 11);
+    assert.deepEqual(simulado.pendentes, catalogo.questoes.map(q => q._id));
+    assert.ok(simulado.pendentes.includes('scrum-existente'));
+    assert.deepEqual(await iniciar(), simulado);
+    const agenda = () => api('/estudo/agenda?simulado=1&deslocamento_utc_min=0', undefined, usuario.id);
+    const abrir = status => api('/estudo/simulados', { cronograma_id: ciclo.id, agendado: true, deslocamento_utc_min: 0 }, usuario.id, status);
+    assert.deepEqual(await agenda(), { revisoes: [], em_andamento: false });
+    await abrir(400);
+    const etapa = ciclo.etapas.find(e => e.materia_id === 'mat-ageis');
+    const concluir = async (concluida, instante, tema) => {
+      const resultado = await api('/sync', { operacoes: [{ id: 1, entidade: 'etapa_estudo', entidade_id: etapa.id,
+        operacao: 'update', payload: { concluida, concluida_em: instante, tema_id: tema, atualizado_em: new Date().toISOString() } }] }, usuario.id);
+      assert.equal(resultado.resultados[0].status, 'ok');
+    };
+    const agora = Date.now();
+    const data = dias => new Date(agora + dias * 86400000);
+    const ageis = ['gov-kanban-fluxo', 'gov-kanban-limite', 'scrum-existente'];
+    const previstas = dias => ageis.map(questao_id => ({ questao_id, vencimento: data(dias).toISOString().slice(0, 10) }));
+    await concluir(1, data(0).toISOString());
+    assert.deepEqual((await agenda()).revisoes, previstas(3));
+    await abrir(400);
+    await concluir(0, null, null);
+    assert.deepEqual((await agenda()).revisoes, []);
+    await concluir(1, data(-4).toISOString(), 'tema-scrum');
+    const provaDoDia = await abrir(200);
+    assert.deepEqual(provaDoDia, { id: simulado.id, total: ageis.length, pendentes: ageis });
+    assert.deepEqual(await abrir(200), provaDoDia);
+    assert.equal((await agenda()).em_andamento, true);
+    for (const [i, questao_id] of ageis.entries()) {
+      const fim = await api('/sync', { operacoes: [{ id: 1, entidade: 'tentativa_exercicio', entidade_id: randomUUID(),
+        operacao: 'insert', payload: { questao_id, simulado_id: provaDoDia.id, alternativa: 'A',
+          dificuldade_informada: 3, concluir_simulado: i === ageis.length - 1, deslocamento_utc_min: 0 } }] }, usuario.id);
+      assert.equal(fim.resultados[0].status, 'ok');
+    }
+    assert.deepEqual(await agenda(), { revisoes: previstas(1), em_andamento: false });
+    await abrir(400);
+  });
   for (const trilha_id of [undefined, 'inexistente', 'vazia']) {
     await api('/auth/cadastro', { ...cadastro, trilha_id }, 'u1', 400);
     assert.equal(await Usuario.countDocuments({ email: cadastro.email }), 0);
@@ -140,6 +193,109 @@ test('API de estudo persiste, recupera e isola cronogramas e revisões', { skip:
   assert.equal(ciclos.length, 3);
   const [aberto] = ciclos.filter(c => c.ativo);
   assert.equal(aberto.data_inicio, hoje.toISOString().slice(0, 10));
-  assert.ok(Math.abs(aberto.pesos[0].peso - 1.216) < 1e-9);
+  assert.ok(Math.abs(aberto.pesos[0].peso_inicial - 1.216) < 1e-9);
+  assert.ok(Math.abs(aberto.pesos[0].peso - (1.216 + (0.8 - 1.216) / 5)) < 1e-9);
   assert.equal(ciclos.find(c => c.id === 'c2').pesos[0].peso, 1);
+
+  await t.test('retoma, fecha dois simulados e leva os pesos para a próxima semana uma única vez', async () => {
+    await Trilha.create({ _id: 'prova', nome: 'Prova', materias: ['a', 'b', 'c'].map(_id => ({ _id, nome: _id })) });
+    const questoes = ['a1', 'a2', 'a3', 'a4', 'b1', 'c1'];
+    await Questao.create(questoes.map(_id => ({ _id, materiaId: _id[0], temaId: 'tema', enunciado: 'Q?',
+      alternativas: ['A', 'B'], gabarito: 'B', banca: 'Teste', ano: 2025 })));
+    const { cronograma } = await api('/estudo/ciclos', { id: 'prova-u2', trilha_id: 'prova', deslocamento_utc_min: 0 }, 'u2');
+    const iniciar = () => api('/estudo/simulados', { cronograma_id: cronograma.id, deslocamento_utc_min: 0 }, 'u2');
+    const fechar = (id, usuario = 'u2', status = 200) =>
+      api('/estudo/simulados/' + id + '/concluir', { deslocamento_utc_min: 0 }, usuario, status);
+    const responder = async (id, questao, alternativa, usuario = 'u2', concluir = false) => {
+      const { resultados } = await api('/sync', { operacoes: [{ id: 1, entidade: 'tentativa_exercicio',
+        operacao: 'insert', entidade_id: randomUUID(), payload: { simulado_id: id, questao_id: questao,
+          alternativa, concluir_simulado: concluir, dificuldade_informada: questao === 'c1' ? 3 : 1, deslocamento_utc_min: 0 } }] }, usuario);
+      return resultados[0].status;
+    };
+    const [sim, mesmo] = await Promise.all([iniciar(), iniciar()]);
+    assert.deepEqual(sim, mesmo);
+    assert.deepEqual(sim.pendentes, questoes);
+    await fechar(sim.id, 'u1', 400);
+    await fechar(sim.id, 'u2', 400);
+    assert.equal(await responder(sim.id, 'q', 'A'), 'rejeitada');
+    assert.equal(await responder(sim.id, 'a1', 'A', 'u1'), 'rejeitada');
+    assert.equal(await responder(sim.id, 'a1', 'A'), 'ok');
+    assert.equal(await responder(sim.id, 'a1', 'A'), 'rejeitada');
+    const retomado = await iniciar();
+    assert.deepEqual(retomado.pendentes, questoes.slice(1));
+    for (const q of retomado.pendentes) assert.equal(await responder(sim.id, q, q[0] === 'a' ? 'A' : 'B'), 'ok');
+    const [primeiro, repetido] = await Promise.all([fechar(sim.id), fechar(sim.id)]);
+    assert.deepEqual(primeiro, repetido);
+    function conferirResumo(antes, { cronograma: depois, resumo }) {
+      assert.deepEqual(resumo.pesos, depois.pesos.map(p => ({
+        materia_id: p.materia_id, anterior: antes.pesos.find(a => a.materia_id === p.materia_id).peso, atual: p.peso,
+      })));
+      const esperados = [];
+      for (const dia of new Set(antes.etapas.map(e => e.data))) {
+        const anteriores = antes.etapas.filter(e => e.data === dia);
+        depois.etapas.filter(e => e.data === dia).forEach((e, i) => {
+          if (anteriores[i].materia_id !== e.materia_id) esperados.push({
+            data: dia, posicao: i + 1, anterior: anteriores[i].materia_id, atual: e.materia_id,
+          });
+        });
+      }
+      assert.deepEqual(resumo.blocos, esperados);
+    }
+    conferirResumo(cronograma, primeiro);
+    assert.ok(primeiro.resumo.blocos.length > 0);
+    assert.deepEqual(primeiro.resumo.pesos.find(p => p.materia_id === 'c'), { materia_id: 'c', anterior: 1, atual: 1 });
+    assert.ok(Math.abs(primeiro.cronograma.pesos[0].peso - 1.8) < 1e-10);
+    assert.ok(primeiro.cronograma.etapas.filter(e => e.materia_id === 'a').length >
+      cronograma.etapas.filter(e => e.materia_id === 'a').length);
+    const agora = new Date().toISOString();
+    const marcacao = await api('/sync', { operacoes: [{ id: 1, entidade: 'etapa_estudo', operacao: 'update',
+      entidade_id: primeiro.cronograma.etapas[0].id, payload: { concluida: 1, concluida_em: agora, atualizado_em: agora } }] }, 'u2');
+    assert.equal(marcacao.resultados[0].status, 'ok', marcacao.resultados[0].motivo);
+    const outro = await iniciar();
+    assert.notEqual(outro.id, sim.id);
+    assert.equal(await responder(outro.id, questoes[0], 'B', 'u2', true), 'rejeitada');
+    for (const q of questoes) assert.equal(await responder(outro.id, q, 'B', 'u2', q === questoes.at(-1)), 'ok');
+    const confirmado = (await api('/sync', undefined, 'u2')).cronogramas.find(c => c.ativo);
+    const segundoResumo = await fechar(outro.id);
+    const { cronograma: atualizado } = segundoResumo;
+    conferirResumo(primeiro.cronograma, segundoResumo);
+    assert.ok(segundoResumo.resumo.blocos.every(b => b.data !== atualizado.data_inicio));
+    assert.deepEqual((await fechar(sim.id)).resumo, primeiro.resumo);
+    assert.deepEqual(confirmado, atualizado);
+    const esperado = 1 + 8 / 12 * (0.8 + 0.14);
+    assert.ok(Math.abs(atualizado.pesos[0].peso - esperado) < 1e-10);
+    assert.equal(atualizado.pesos[0].peso_inicial, 1);
+    assert.equal(atualizado.etapas[0].concluida, 1);
+    assert.deepEqual(atualizado.etapas.slice(0, 4).map(e => e.id), primeiro.cronograma.etapas.slice(0, 4).map(e => e.id));
+    const revisar = async (alternativa, id = randomUUID(), incluir = false) => {
+      const r = await api('/sync', { operacoes: [{ id: 1, entidade: 'tentativa_exercicio', operacao: 'insert',
+        entidade_id: id, payload: { questao_id: 'a1', alternativa, dificuldade_informada: 1, deslocamento_utc_min: 0, incluir_cronograma: incluir } }] }, 'u2');
+      assert.equal(r.resultados[0].status, 'ok');
+      return r.resultados[0];
+    };
+    const carregarPlano = () => api('/estudo/ciclos/atual', { incluir_cronograma: true, deslocamento_utc_min: 0 }, 'u2');
+    await revisar('B');
+    const aposPrimeira = (await api('/sync', undefined, 'u2')).cronogramas.find(c => c.ativo);
+    assert.notEqual(aposPrimeira.pesos[0].peso, atualizado.pesos[0].peso);
+    const idRevisao = randomUUID();
+    const { plano: aposRevisao } = await revisar('A', idRevisao, true);
+    assert.equal(aposRevisao.resumo.pesos[0].anterior, aposPrimeira.pesos[0].peso);
+    assert.deepEqual((await revisar('A', idRevisao, true)).plano, aposRevisao);
+    assert.ok(Math.abs(aposRevisao.cronograma.pesos[0].peso - (1 + 2 * (5 * 0.8 + 4 * 0.14) / 13)) < 1e-10);
+    assert.ok(aposRevisao.resumo.pesos[0].atual > aposRevisao.resumo.pesos[0].anterior);
+    const primeiroDia = c => c.etapas.slice(0, 4).map(e => [e.id, e.materia_id, e.concluida, e.concluida_em]);
+    assert.deepEqual(primeiroDia(aposRevisao.cronograma), primeiroDia(atualizado));
+    const repeticao = await carregarPlano();
+    assert.deepEqual(repeticao.cronograma, aposRevisao.cronograma);
+    assert.deepEqual(repeticao.resumo.blocos, []);
+    await Cronograma.updateOne({ _id: cronograma.id }, { $set: { dataInicio: inicio } });
+    await Tentativa.updateMany({ usuarioId: 'u2', simuladoId: { $in: [sim.id, outro.id] } }, { $set: { diaEstudo: inicio } });
+    await Tentativa.updateMany({ usuarioId: 'u2', questaoId: 'a1', simuladoId: null }, { $set: { diaEstudo: inicio, respondidaEm: inicio } });
+    await Tentativa.updateOne({ usuarioId: 'u2', questaoId: 'a1', simuladoId: null, acertou: false },
+      { $set: { respondidaEm: new Date(+inicio + 60000) } });
+    await api('/estudo/ciclos/atual', { deslocamento_utc_min: 0 }, 'u2');
+    const novo = (await api('/sync', undefined, 'u2')).cronogramas.find(c => c.ativo);
+    assert.equal(novo.pesos[0].peso_inicial, aposRevisao.cronograma.pesos[0].peso);
+    assert.equal(novo.pesos[0].peso, aposRevisao.cronograma.pesos[0].peso);
+  });
 });

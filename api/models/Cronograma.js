@@ -37,6 +37,7 @@ EtapaSchema.pre('validate', function () {
 const PesoSchema = new Schema(
   {
     materiaId: { type: String, required: true },
+    pesoInicial: { type: Number, min: Number.MIN_VALUE },
     peso: {
       type: Number,
       required: true,
@@ -60,6 +61,7 @@ const CronogramaSchema = new Schema(
     usuarioId: { type: String, required: true },
     trilhaId: { type: String, required: true },
     dataInicio: { type: Date, required: true },
+    respostasAPartirDe: Date,
     ativo: { type: Boolean, default: true },
     distribuicaoDiaria: Boolean,
     versaoPlanejamento: Number,

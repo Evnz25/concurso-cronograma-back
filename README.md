@@ -423,7 +423,9 @@ O `id` do usuário é gerado **pelo servidor** no cadastro (criar conta exige in
 | Rota | Entrada e resultado |
 |---|---|
 | `POST /estudo/ciclos` | Recebe `id`, `trilha_id` e `deslocamento_utc_min`. Retorna `{ cronograma }` com pesos e blocos para sete dias. O mesmo ID recupera o ciclo em caso de reenvio. |
-| `POST /estudo/ciclos/atual` | Recebe `deslocamento_utc_min` e garante o plano da semana atual da trilha ativa. Retorna `{ ok: true }`. Em seguida, `GET /sync` entrega o cronograma com seus pesos e etapas. |
+| `POST /estudo/ciclos/atual` | Sincroniza a semana atual e incorpora as respostas de prática e revisão já gravadas. Recebe `deslocamento_utc_min`. Com `incluir_cronograma: true`, também devolve o cronograma e o resumo das mudanças. |
+| `POST /estudo/simulados` | Recebe `cronograma_id` e `deslocamento_utc_min`. Inicia ou retoma o simulado do ciclo ativo e retorna `id`, `total` e as questões `pendentes`. |
+| `POST /estudo/simulados/:id/concluir` | Devolve o cronograma atual e o `resumo` gravado na conclusão. Ele inclui o peso anterior e o novo de cada matéria e a troca de matéria por data e posição do bloco. Reenviar a confirmação mantém o resumo original. Simulados concluídos antes desse registro devolvem `resumo: null`. |
 | `GET /estudo/agenda` | Retorna `{ revisoes: [{ questao_id, vencimento }] }` com a data vigente de cada questão do usuário, em ordem de vencimento. |
 | `POST /estudo/previa` | Recebe `id`, `questao_id`, `alternativa`, `respondida_em` e `deslocamento_utc_min`. Retorna as datas estimadas para `hard`, `medium` e `easy`. A gravação por `POST /sync` devolve a tentativa definitiva no resultado da operação. |
 
@@ -431,7 +433,13 @@ O deslocamento é em minutos a leste de UTC (São Paulo usa -180). Clientes anti
 
 Cada ciclo tem 28 blocos de uma hora, quatro por dia durante sete dias. A API atribui cada bloco à matéria com a maior prioridade `peso / (2 × blocos já atribuídos + 1)`, até o limite de 14 por matéria na semana. As cotas são distribuídas pelos dias, com no máximo dois blocos por matéria ao dia e alternância entre matérias. Em uma trilha de matéria única, ela ocupa todos os quatro blocos diários. O desempate entre pesos iguais alterna a cada ciclo semanal. Há um intervalo de 15 minutos após as duas primeiras horas de estudo, e as revisões orientam a ordem entre matérias empatadas.
 
-As semanas começam na data de início do ciclo e têm sete dias civis. A primeira começa com peso 1 em cada matéria. Ao renovar, a API considera a última resposta sincronizada de cada questão em cada semana encerrada, restrita à conta e às matérias da trilha. Para difícil, médio e fácil, o sinal vale +0,80, +0,54 e +0,32 em um erro, ou +0,14, 0 e −0,10 em um acerto. Com `n` questões distintas respondidas na matéria, o peso-alvo é `1 + 2 × média dos sinais` e o novo peso é `anterior + n/(n+4) × (alvo − anterior)`. Matérias sem respostas conservam seu peso.
+O ciclo tem sete dias civis a partir da data inicial. Cada matéria começa a primeira semana com peso 1. Os campos `peso_inicial` e `peso` guardam a base do ciclo e a prioridade vigente. Cada tentativa tem uma revisão individual e pode incluir `simulado_id`. Na última resposta, o app envia `concluir_simulado: true` para persistir a resposta e o novo plano na mesma transação.
+
+O cronograma consulta `GET /estudo/agenda?simulado=1&deslocamento_utc_min=-180`. A primeira revisão das questões inéditas de uma matéria parte do dia local de conclusão do primeiro bloco dessa matéria. Isso também vale para blocos antigos registrados com um tema específico. O intervalo inicial é `round(3 / peso)`, limitado a 1–7 dias. Para questões respondidas vale a próxima data individual da repetição espaçada. Com `agendado: true`, o início do simulado seleciona as questões devidas até hoje e fixa a seleção para a retomada. Blocos concluídos em ciclos anteriores da mesma trilha também contam.
+
+A API recalcula os pesos a partir da base do ciclo, das respostas de todos os simulados concluídos e da última resposta de prática ou revisão por questão na semana. O app sincroniza o plano após cada resposta comum. Abrir ou atualizar os dados também incorpora as respostas já salvas. Para difícil, médio e fácil, o sinal vale +0,80, +0,54 e +0,32 em um erro, ou +0,14, 0 e −0,10 em um acerto. Com `n` respostas na matéria, o alvo é `1 + 2 × média dos sinais` e o novo peso é `base + n/(n+4) × (alvo − base)`. A renovação usa a mesma base e o mesmo histórico para evitar dupla contagem.
+
+A meta semanal reserva um bloco por matéria quando há capacidade. O replanejamento desconta os minutos concluídos e os blocos futuros já fixados. Dias passados, blocos editados e o dia atual com estudo já concluído ficam preservados. O tempo pendente de dias passados não dá crédito de estudo. Se acabaram as vagas, o simulado ainda atualiza os pesos.
 
 A renovação ocorre quando o aplicativo sincroniza ou atravessa a virada da semana. Se houve várias semanas de ausência, as semanas com respostas são processadas em ordem até a atual. Apenas o plano a ser usado agora é gerado. A substituição do ciclo ativo e a gravação dos novos pesos e blocos ocorrem na mesma transação. Os cronogramas já gerados conservam os valores usados naquele momento. Iniciar outra trilha ou reiniciar explicitamente o ciclo começa uma nova sequência com pesos iguais.
 
@@ -503,7 +511,7 @@ O app deve reenviar a fila **em ordem** e parar no primeiro `falha`, em vez de s
 
 | Entidade | `insert` | `update` | `delete` | Campos do `payload` |
 |---|:---:|:---:|:---:|---|
-| `tentativa_exercicio` | ✅ | ❌ | ❌ | `questao_id`, `alternativa` (A–E), `dificuldade_informada`, `respondida_em`, `deslocamento_utc_min`. Para filas antigas também é aceito `acertou`. A API calcula os campos de revisão. |
+| `tentativa_exercicio` | ✅ | ❌ | ❌ | `questao_id`, `alternativa` (A–E), `dificuldade_informada`, `respondida_em`, `deslocamento_utc_min`. Para filas antigas também é aceito `acertou`. A API salva a resposta de prática ou revisão, calcula a próxima revisão e replaneja o restante do ciclo em uma transação. Com `incluir_cronograma: true`, o resultado inclui `plano`, com o cronograma e o resumo da resposta, ou `null` se não houver plano. Reenviar o mesmo ID recupera o resultado sem contar a resposta novamente. |
 | `feedback` | ✅ | ❌ | ❌ | `tipo` (`erro`/`sugestao`), `texto`, `versao_app` |
 | `cronograma` | ✅ | ✅ (só `ativo`) | ❌ | `trilha_id`, `data_inicio` (`AAAA-MM-DD`), `ativo` (0/1), `atualizado_em` |
 | `peso_materia` | ✅ | ✅ | ❌ | `peso` (número > 0, máximo 1000), `atualizado_em`. O `entidade_id` é `"cronograma_id:materia_id"` |

@@ -100,7 +100,11 @@ function cotasDeBlocos(pesos, dias, inicio) {
   const primeiro = Math.floor(inicio.getTime() / SEMANA_MS) % pesos.length;
   const cotas = [...pesos.slice(primeiro), ...pesos.slice(0, primeiro)]
     .map(({ materiaId, peso }) => ({ materiaId, peso, saldo: 0 }));
-  for (let i = 0; i < dias * BLOCOS_POR_DIA; i++) {
+  const total = dias * BLOCOS_POR_DIA;
+  if (total >= cotas.length) {
+    for (const cota of cotas) cota.saldo = 1;
+  }
+  for (let i = cotas.reduce((soma, cota) => soma + cota.saldo, 0); i < total; i++) {
     let melhor;
     for (const cota of cotas) {
       if (cota.saldo === limite) continue;
@@ -157,6 +161,106 @@ function gerarEtapas(pesos, revisoes, inicio) {
   return distribuirDias(pesos, diasDoCiclo(inicio), revisoes, inicio);
 }
 
+// Há só quatro posições: escolhe a ordem com menos repetições adjacentes e,
+// em caso de empate, conserva o maior número de blocos da agenda anterior.
+function ordenarVagas(etapas, vagas, materias) {
+  let melhor = etapas;
+  let menorCusto = Infinity;
+  const ordem = etapas.map(e => e.materiaId);
+  function visitar(i, restantes) {
+    if (i === vagas.length) {
+      const custo = ordem.reduce((n, id, j) =>
+        n + (id === ordem[j - 1] ? BLOCOS_POR_DIA + 1 : 0) + Number(id !== etapas[j].materiaId), 0);
+      if (custo < menorCusto) {
+        menorCusto = custo;
+        melhor = etapas.map((e, j) => e.materiaId === ordem[j] ? e : { ...e, _id: randomUUID(), materiaId: ordem[j] });
+      }
+      return;
+    }
+    for (const id of new Set(restantes)) {
+      ordem[vagas[i]] = id;
+      const proximos = restantes.slice();
+      proximos.splice(proximos.indexOf(id), 1);
+      visitar(i + 1, proximos);
+    }
+  }
+  visitar(0, materias);
+  return melhor;
+}
+
+function replanejarSemana(ciclo, pesos, hoje) {
+  if (ciclo.distribuicaoDiaria === false || !pesos.length) return ciclo.etapas;
+  const metas = cotasDeBlocos(pesos, DIAS_DO_CICLO, ciclo.dataInicio);
+  const creditos = new Map(metas.map(m => [m.materiaId, 0]));
+  const limite = pesos.length === 1 ? 4 : 2;
+  const porDia = new Map();
+  for (const etapa of ciclo.etapas) {
+    const dia = +etapa.data;
+    if (!porDia.has(dia)) porDia.set(dia, []);
+    porDia.get(dia).push(etapa);
+  }
+  const dias = [...porDia].sort(([a], [b]) => a - b).map(([dia, etapas]) => {
+    const padrao = etapas.length === BLOCOS_POR_DIA && etapas.every(e => e.duracaoMin === MINUTOS_POR_BLOCO);
+    const preservar = !padrao || dia < +hoje || (dia === +hoje && etapas.some(e => e.concluida));
+    const vagas = [];
+    const contagem = new Map();
+    etapas.forEach((e, i) => {
+      if (!preservar && !e.concluida && !e.atualizadoEm) {
+        vagas.push(i);
+      } else {
+        contagem.set(e.materiaId, (contagem.get(e.materiaId) ?? 0) + 1);
+        if (e.concluida || dia >= +hoje) {
+          creditos.set(e.materiaId, (creditos.get(e.materiaId) ?? 0) + e.duracaoMin / MINUTOS_POR_BLOCO);
+        }
+      }
+    });
+    return { etapas, vagas, contagem };
+  });
+  // Atribui as cotas à semana inteira. Se uma data estiver cheia, um bloco
+  // móvel pode trocar de dia para abrir espaço, respeitando as conclusões.
+  const abertos = dias.filter(d => d.vagas.length);
+  for (const dia of abertos) {
+    dia.alocados = [];
+    dia.anteriores = dia.vagas.map(i => dia.etapas[i].materiaId);
+  }
+  function encaixar(id, visitados) {
+    const disponiveis = abertos.filter(d => !visitados.has(d) && (d.contagem.get(id) ?? 0) < limite);
+    const mantemBloco = d => d.anteriores.filter(m => m === id).length > d.alocados.filter(m => m === id).length;
+    disponiveis.sort((a, b) => (a.contagem.get(id) ?? 0) - (b.contagem.get(id) ?? 0) ||
+      Number(mantemBloco(b)) - Number(mantemBloco(a)) ||
+      a.alocados.length / a.vagas.length - b.alocados.length / b.vagas.length);
+    const livre = disponiveis.find(d => d.alocados.length < d.vagas.length);
+    if (livre) {
+      livre.alocados.push(id);
+      livre.contagem.set(id, (livre.contagem.get(id) ?? 0) + 1);
+      return true;
+    }
+    for (const dia of disponiveis) {
+      if (visitados.has(dia)) continue;
+      visitados.add(dia);
+      for (const outro of new Set(dia.alocados)) {
+        if (outro === id || !encaixar(outro, visitados)) continue;
+        dia.alocados[dia.alocados.indexOf(outro)] = id;
+        dia.contagem.set(outro, dia.contagem.get(outro) - 1);
+        dia.contagem.set(id, (dia.contagem.get(id) ?? 0) + 1);
+        return true;
+      }
+    }
+    return false;
+  }
+  const vagas = abertos.reduce((n, dia) => n + dia.vagas.length, 0);
+  for (let i = 0; i < vagas; i++) {
+    const prioridades = metas.map(m => {
+      const credito = creditos.get(m.materiaId);
+      return { id: m.materiaId, semCobertura: credito === 0, deficit: m.saldo - credito };
+    }).sort((a, b) => Number(b.semCobertura) - Number(a.semCobertura) || b.deficit - a.deficit);
+    const escolhida = prioridades.find(m => encaixar(m.id, new Set()));
+    if (!escolhida) throw new Rejeicao('Os blocos fixos impedem a distribuição deste cronograma.');
+    creditos.set(escolhida.id, creditos.get(escolhida.id) + 1);
+  }
+  return dias.flatMap(d => d.vagas.length ? ordenarVagas(d.etapas, d.vagas, d.alocados) : d.etapas);
+}
+
 function redistribuirCicloAnterior({ dataInicio, pesos, etapas, distribuicaoDiaria, versaoPlanejamento }, hoje, revisoes) {
   // O gerador anterior criava pesos sem timestamp de edição e etapas com UUID e pausa de 15 min.
   if (!pesos?.length || !etapas?.length) return null;
@@ -203,4 +307,4 @@ function redistribuirCicloAnterior({ dataInicio, pesos, etapas, distribuicaoDiar
   return resultado.sort((a, b) => a.data - b.data);
 }
 
-module.exports = { deslocamento, diaLocal, calcularRevisao, gerarEtapas, redistribuirCicloAnterior, pesosDaSemana, SEMANA_MS, VERSAO_PLANEJAMENTO };
+module.exports = { deslocamento, diaLocal, calcularRevisao, gerarEtapas, redistribuirCicloAnterior, replanejarSemana, pesosDaSemana, SEMANA_MS, VERSAO_PLANEJAMENTO };
